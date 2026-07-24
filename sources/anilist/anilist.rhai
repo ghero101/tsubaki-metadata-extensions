@@ -1,0 +1,1018 @@
+// AniList Metadata Provider
+// Built-in addon for Tsubaki - provides manga metadata via AniList GraphQL API
+
+const BASE_URL = "https://graphql.anilist.co";
+
+// Get source information
+fn get_source_info() {
+    #{
+        id: "anilist",
+        name: "AniList",
+        base_url: "https://anilist.co",
+        language: "en",
+        supported_languages: ["en", "ja"],
+        requires_authentication: false,
+        is_metadata_provider: true
+    }
+}
+
+// Normalize string for comparison (lowercase, basic cleanup)
+fn normalize(s) {
+    // Simple normalization: lowercase and trim
+    s.to_lower().trim()
+}
+
+// Wrap http_post_json so a network exception falls through to "" and
+// downstream json_parse / data-access checks see "no data" rather than
+// crashing the entire search / get_series / get_latest_updates call.
+// All 7 GraphQL call sites in this plugin route through this helper.
+fn safe_post(query) {
+    try {
+        return http_post_json(BASE_URL, query);
+    } catch {
+        return "";
+    }
+}
+
+// Clean up AniList description. The API's `asHtml: false` strips most HTML
+// but leaves <br> tags, markdown bold (__text__), and AniList's own spoiler
+// syntax (~!hidden!~) in place. Pre-cleanup the UI rendered all of these
+// verbatim, which looked broken.
+fn clean_description(raw) {
+    if raw == () || raw == "" { return raw; }
+    let s = `${raw}`;
+    // Newlines
+    s = s.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
+    // Markdown bold/italic — keep the text, drop the markers
+    s = s.replace("__", "").replace("**", "");
+    // Common HTML entities AniList sometimes leaves in
+    s = s.replace("&amp;", "&").replace("&nbsp;", " ").replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">");
+    // AniList spoiler tags. Strip whole `~!...!~` regions — users can
+    // toggle spoilers in the source UI; here they're noise.
+    let cleaned = "";
+    let i = 0;
+    let in_spoiler = false;
+    while i < s.len() {
+        if !in_spoiler && i + 1 < s.len() && s.sub_string(i, 2) == "~!" {
+            in_spoiler = true;
+            i += 2;
+        } else if in_spoiler && i + 1 < s.len() && s.sub_string(i, 2) == "!~" {
+            in_spoiler = false;
+            i += 2;
+        } else {
+            if !in_spoiler { cleaned += s.sub_string(i, 1); }
+            i += 1;
+        }
+    }
+    cleaned.trim()
+}
+
+// Map AniList status enum (RELEASING / FINISHED / HIATUS / CANCELLED /
+// NOT_YET_RELEASED) to the canonical "Ongoing / Completed / Hiatus /
+// Cancelled / Upcoming" set the UI filters on. Returns () for unknown values
+// so callers can fall through.
+fn normalize_status(raw) {
+    if raw == () || raw == "" { return (); }
+    let s = `${raw}`.to_upper();
+    if s == "RELEASING" { return "Ongoing"; }
+    if s == "FINISHED" { return "Completed"; }
+    if s == "HIATUS" { return "Hiatus"; }
+    if s == "CANCELLED" { return "Cancelled"; }
+    if s == "NOT_YET_RELEASED" { return "Upcoming"; }
+    raw
+}
+
+// Search for manga series
+fn search_series(query, page, auth) {
+    let graphql_query = `{
+        "query": "query ($search: String, $page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { total currentPage lastPage hasNextPage } media(search: $search, type: MANGA) { id title { romaji english native } description(asHtml: false) coverImage { large medium } genres status isAdult startDate { year } } } }",
+        "variables": {"search": "${query}", "page": ${page}, "perPage": 20}
+    }`;
+
+    let response = safe_post(graphql_query);
+    let json = json_parse(response);
+
+    let series = [];
+    let page_info = json.data.Page.pageInfo;
+    let media_list = json.data.Page.media;
+
+    if media_list != () {
+        for media in media_list {
+            let title = "";
+            if media.title.english != () && media.title.english != "" {
+                title = media.title.english;
+            } else if media.title.romaji != () {
+                title = media.title.romaji;
+            } else if media.title.native != () {
+                title = media.title.native;
+            }
+
+            let alt_titles = [];
+            if media.title.romaji != () && media.title.romaji != title {
+                alt_titles.push(media.title.romaji);
+            }
+            if media.title.native != () && media.title.native != title {
+                alt_titles.push(media.title.native);
+            }
+            if media.title.english != () && media.title.english != title {
+                alt_titles.push(media.title.english);
+            }
+
+            let cover_url = "";
+            if media.coverImage != () {
+                if media.coverImage.large != () {
+                    cover_url = media.coverImage.large;
+                } else if media.coverImage.medium != () {
+                    cover_url = media.coverImage.medium;
+                }
+            }
+
+            let rating = "safe";
+            if media.isAdult == true {
+                rating = "nsfw";
+            }
+
+            series.push(#{
+                id: `${media.id}`,
+                title: title,
+                alternate_titles: alt_titles,
+                description: clean_description(media.description),
+                cover_url: cover_url,
+                authors: [],
+                artists: [],
+                status: normalize_status(media.status),
+                genres: media.genres,
+                tags: [],
+                year: media.startDate.year,
+                content_rating: rating,
+                url: `https://anilist.co/manga/${media.id}`
+            });
+        }
+    }
+
+    #{
+        series: series,
+        has_more: page_info.hasNextPage,
+        total: page_info.total,
+        current_page: page_info.currentPage
+    }
+}
+
+// Get detailed series information by ID
+fn get_series(id_or_url, auth) {
+    // Extract ID from URL if needed
+    let id = id_or_url;
+    if id_or_url.contains("anilist.co/manga/") {
+        let parts = id_or_url.split("/manga/");
+        if parts.len() > 1 {
+            id = parts[1].split("/")[0];
+        }
+    }
+
+    let graphql_query = `{
+        "query": "query ($id: Int) { Media(id: $id, type: MANGA) { id title { romaji english native } description(asHtml: false) coverImage { extraLarge large medium } genres tags { name rank } status volumes chapters isAdult startDate { year month day } staff { edges { role node { name { full } } } } } }",
+        "variables": {"id": ${id}}
+    }`;
+
+    let response = safe_post(graphql_query);
+    let json = json_parse(response);
+    let media = json.data.Media;
+
+    if media == () {
+        return ();
+    }
+
+    let title = "";
+    if media.title.english != () && media.title.english != "" {
+        title = media.title.english;
+    } else if media.title.romaji != () {
+        title = media.title.romaji;
+    } else if media.title.native != () {
+        title = media.title.native;
+    }
+
+    let alt_titles = [];
+    if media.title.romaji != () && media.title.romaji != title {
+        alt_titles.push(media.title.romaji);
+    }
+    if media.title.native != () && media.title.native != title {
+        alt_titles.push(media.title.native);
+    }
+    if media.title.english != () && media.title.english != title {
+        alt_titles.push(media.title.english);
+    }
+
+    let cover_url = "";
+    if media.coverImage != () {
+        if media.coverImage.extraLarge != () {
+            cover_url = media.coverImage.extraLarge;
+        } else if media.coverImage.large != () {
+            cover_url = media.coverImage.large;
+        } else if media.coverImage.medium != () {
+            cover_url = media.coverImage.medium;
+        }
+    }
+
+    let rating = "safe";
+    if media.isAdult == true {
+        rating = "adult";
+    }
+
+    // Only include tags with rank >= 60 to reduce noise from uncertain tags
+    let tags = [];
+    if media.tags != () {
+        for tag in media.tags {
+            let rank = tag.rank;
+            if rank == () || rank >= 60 {
+                tags.push(tag.name);
+            }
+        }
+    }
+
+    // Extract authors and artists from staff
+    let authors = [];
+    let artists = [];
+    if media.staff != () && media.staff.edges != () {
+        for edge in media.staff.edges {
+            let role = edge.role.to_lower();
+            let name = edge.node.name.full;
+            if role.contains("story") || role.contains("original creator") || role.contains("writer") {
+                authors.push(name);
+            }
+            if role.contains("art") || role.contains("illustration") {
+                artists.push(name);
+            }
+        }
+    }
+
+    #{
+        id: `${media.id}`,
+        title: title,
+        alternate_titles: alt_titles,
+        description: clean_description(media.description),
+        cover_url: cover_url,
+        authors: authors,
+        artists: artists,
+        status: normalize_status(media.status),
+        genres: media.genres,
+        tags: tags,
+        year: media.startDate.year,
+        content_rating: rating,
+        url: `https://anilist.co/manga/${media.id}`,
+        extra: #{
+            volumes: media.volumes,
+            chapters: media.chapters,
+            provider: "anilist",
+            provider_id: `${media.id}`
+        }
+    }
+}
+
+// Get latest/trending manga (for browse)
+fn get_latest_updates(page, auth) {
+    let graphql_query = `{
+        "query": "query ($page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { total currentPage lastPage hasNextPage } media(type: MANGA, sort: TRENDING_DESC) { id title { romaji english native } description(asHtml: false) coverImage { large medium } genres status isAdult startDate { year } } } }",
+        "variables": {"page": ${page + 1}, "perPage": 25}
+    }`;
+
+    let response = safe_post(graphql_query);
+    let json = json_parse(response);
+
+    let series = [];
+
+    if json == () || json["data"] == () || json["data"]["Page"] == () {
+        return #{ series: [], has_more: false, total: () };
+    }
+
+    let page_info = json["data"]["Page"]["pageInfo"];
+    let media_list = json["data"]["Page"]["media"];
+
+    if media_list != () {
+        for media in media_list {
+            let title = "";
+            if media["title"]["english"] != () && media["title"]["english"] != "" {
+                title = media["title"]["english"];
+            } else if media["title"]["romaji"] != () {
+                title = media["title"]["romaji"];
+            } else if media["title"]["native"] != () {
+                title = media["title"]["native"];
+            }
+
+            let alt_titles = [];
+            if media["title"]["romaji"] != () && media["title"]["romaji"] != title {
+                alt_titles.push(media["title"]["romaji"]);
+            }
+            if media["title"]["native"] != () && media["title"]["native"] != title {
+                alt_titles.push(media["title"]["native"]);
+            }
+
+            let cover_url = "";
+            if media["coverImage"] != () {
+                if media["coverImage"]["large"] != () {
+                    cover_url = media["coverImage"]["large"];
+                } else if media["coverImage"]["medium"] != () {
+                    cover_url = media["coverImage"]["medium"];
+                }
+            }
+
+            let rating = "safe";
+            if media["isAdult"] == true {
+                rating = "nsfw";
+            }
+
+            let genres = [];
+            if media["genres"] != () {
+                genres = media["genres"];
+            }
+
+            series.push(#{
+                id: media["id"].to_string(),
+                title: title,
+                alternate_titles: alt_titles,
+                description: clean_description(media["description"]),
+                cover_url: cover_url,
+                authors: [],
+                artists: [],
+                status: normalize_status(media["status"]),
+                genres: genres,
+                tags: [],
+                year: media["startDate"]["year"],
+                content_rating: rating,
+                url: `https://anilist.co/manga/${media["id"]}`
+            });
+        }
+    }
+
+    #{
+        series: series,
+        has_more: page_info["hasNextPage"],
+        total: page_info["total"]
+    }
+}
+
+// Get popular manga
+fn get_popular(page, auth) {
+    let graphql_query = `{
+        "query": "query ($page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { total currentPage lastPage hasNextPage } media(type: MANGA, sort: POPULARITY_DESC) { id title { romaji english native } description(asHtml: false) coverImage { large medium } genres status isAdult startDate { year } } } }",
+        "variables": {"page": ${page + 1}, "perPage": 25}
+    }`;
+
+    let response = safe_post(graphql_query);
+    let json = json_parse(response);
+
+    let series = [];
+
+    if json == () || json["data"] == () || json["data"]["Page"] == () {
+        return #{ series: [], has_more: false, total: () };
+    }
+
+    let page_info = json["data"]["Page"]["pageInfo"];
+    let media_list = json["data"]["Page"]["media"];
+
+    if media_list != () {
+        for media in media_list {
+            let title = "";
+            if media["title"]["english"] != () && media["title"]["english"] != "" {
+                title = media["title"]["english"];
+            } else if media["title"]["romaji"] != () {
+                title = media["title"]["romaji"];
+            } else if media["title"]["native"] != () {
+                title = media["title"]["native"];
+            }
+
+            let cover_url = "";
+            if media["coverImage"] != () {
+                if media["coverImage"]["large"] != () {
+                    cover_url = media["coverImage"]["large"];
+                } else if media["coverImage"]["medium"] != () {
+                    cover_url = media["coverImage"]["medium"];
+                }
+            }
+
+            let rating = "safe";
+            if media["isAdult"] == true {
+                rating = "nsfw";
+            }
+
+            let genres = [];
+            if media["genres"] != () {
+                genres = media["genres"];
+            }
+
+            series.push(#{
+                id: media["id"].to_string(),
+                title: title,
+                alternate_titles: [],
+                description: clean_description(media["description"]),
+                cover_url: cover_url,
+                authors: [],
+                artists: [],
+                status: normalize_status(media["status"]),
+                genres: genres,
+                tags: [],
+                year: media["startDate"]["year"],
+                content_rating: rating,
+                url: `https://anilist.co/manga/${media["id"]}`
+            });
+        }
+    }
+
+    #{
+        series: series,
+        has_more: page_info["hasNextPage"],
+        total: page_info["total"]
+    }
+}
+
+// Get ALL manga sorted by ID for complete database sync
+// This is used for comprehensive metadata sync
+fn get_all_manga(page, auth) {
+    // Sort by ID to get deterministic, complete coverage of all manga
+    // perPage max is 50 for AniList
+    let graphql_query = `{
+        "query": "query ($page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { total currentPage lastPage hasNextPage } media(type: MANGA, sort: ID) { id title { romaji english native } description(asHtml: false) coverImage { large medium } genres status isAdult startDate { year } } } }",
+        "variables": {"page": ${page + 1}, "perPage": 50}
+    }`;
+
+    let response = safe_post(graphql_query);
+    let json = json_parse(response);
+
+    let series = [];
+
+    if json == () || json["data"] == () || json["data"]["Page"] == () {
+        return #{ series: [], has_more: false, total: () };
+    }
+
+    let page_info = json["data"]["Page"]["pageInfo"];
+    let media_list = json["data"]["Page"]["media"];
+
+    if media_list != () {
+        for media in media_list {
+            let title = "";
+            if media["title"]["english"] != () && media["title"]["english"] != "" {
+                title = media["title"]["english"];
+            } else if media["title"]["romaji"] != () {
+                title = media["title"]["romaji"];
+            } else if media["title"]["native"] != () {
+                title = media["title"]["native"];
+            }
+
+            let alt_titles = [];
+            if media["title"]["romaji"] != () && media["title"]["romaji"] != title {
+                alt_titles.push(media["title"]["romaji"]);
+            }
+            if media["title"]["native"] != () && media["title"]["native"] != title {
+                alt_titles.push(media["title"]["native"]);
+            }
+            if media["title"]["english"] != () && media["title"]["english"] != title {
+                alt_titles.push(media["title"]["english"]);
+            }
+
+            let cover_url = "";
+            if media["coverImage"] != () {
+                if media["coverImage"]["large"] != () {
+                    cover_url = media["coverImage"]["large"];
+                } else if media["coverImage"]["medium"] != () {
+                    cover_url = media["coverImage"]["medium"];
+                }
+            }
+
+            let rating = "safe";
+            if media["isAdult"] == true {
+                rating = "nsfw";
+            }
+
+            let genres = [];
+            if media["genres"] != () {
+                genres = media["genres"];
+            }
+
+            series.push(#{
+                id: media["id"].to_string(),
+                title: title,
+                alternate_titles: alt_titles,
+                description: clean_description(media["description"]),
+                cover_url: cover_url,
+                authors: [],
+                artists: [],
+                status: normalize_status(media["status"]),
+                genres: genres,
+                tags: [],
+                year: media["startDate"]["year"],
+                content_rating: rating,
+                url: `https://anilist.co/manga/${media["id"]}`
+            });
+        }
+    }
+
+    #{
+        series: series,
+        has_more: page_info["hasNextPage"],
+        total: page_info["total"]
+    }
+}
+
+// Resolve manga title to AniList ID
+fn resolve_id(title, alt_titles) {
+    // Build list of candidate titles to search
+    let candidates = [title];
+    if alt_titles != () && alt_titles != "" {
+        for alt in alt_titles.split(", ") {
+            let trimmed = alt.trim();
+            if trimmed != "" {
+                candidates.push(trimmed);
+            }
+        }
+    }
+
+    let target_norm = normalize(title);
+
+    for q in candidates {
+        let graphql_query = `{
+            "query": "query ($search: String) { Media(search: $search, type: MANGA) { id title { romaji english native } isAdult } }",
+            "variables": {"search": "${q}"}
+        }`;
+
+        let response = safe_post(graphql_query);
+        let json = json_parse(response);
+
+        if json.data != () && json.data.Media != () {
+            let media = json.data.Media;
+            let mtitle = "";
+            if media.title.english != () && media.title.english != "" {
+                mtitle = media.title.english;
+            } else if media.title.romaji != () {
+                mtitle = media.title.romaji;
+            } else if media.title.native != () {
+                mtitle = media.title.native;
+            }
+
+            if mtitle != "" && normalize(mtitle) == normalize(q) {
+                return #{
+                    provider: "anilist",
+                    provider_id: `${media.id}`,
+                    matched_title: mtitle
+                };
+            }
+        }
+    }
+
+    ()
+}
+
+// ============================================================================
+// TRACKING FEATURES - Requires OAuth2 Authentication
+// Uses AniList GraphQL API: https://docs.anilist.co/guide/introduction
+// ============================================================================
+
+// Reading status mappings
+// AniList statuses: CURRENT, PLANNING, COMPLETED, DROPPED, PAUSED, REPEATING
+fn map_status_to_anilist(status) {
+    switch status.to_lower() {
+        "reading" | "current" => "CURRENT",
+        "completed" | "finished" => "COMPLETED",
+        "on_hold" | "paused" => "PAUSED",
+        "dropped" => "DROPPED",
+        "plan_to_read" | "planning" | "planned" => "PLANNING",
+        "rereading" | "repeating" => "REPEATING",
+        _ => "CURRENT"
+    }
+}
+
+fn map_anilist_status(anilist_status) {
+    switch anilist_status {
+        "CURRENT" => "reading",
+        "COMPLETED" => "completed",
+        "PAUSED" => "on_hold",
+        "DROPPED" => "dropped",
+        "PLANNING" => "plan_to_read",
+        "REPEATING" => "rereading",
+        _ => "unknown"
+    }
+}
+
+// Get authenticated user's info (needed for some queries)
+fn get_viewer(auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    let query = `{
+        "query": "query { Viewer { id name } }"
+    }`;
+
+    let headers = #{
+        "Authorization": `Bearer ${auth.access_token}`,
+        "Content-Type": "application/json"
+    };
+
+    let response = http_post_json_with_headers(BASE_URL, query, headers);
+    let json = json_parse(response);
+
+    if json.errors != () {
+        return #{ error: json.errors[0].message };
+    }
+
+    json.data.Viewer
+}
+
+// Get user's manga list
+fn get_user_list(status_filter, page, auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    let per_page = 50;
+    let status_clause = "";
+    if status_filter != () && status_filter != "" && status_filter != "all" {
+        let al_status = map_status_to_anilist(status_filter);
+        status_clause = `, status: ${al_status}`;
+    }
+
+    let query = `{
+        "query": "query ($page: Int, $perPage: Int) { Page(page: $page, perPage: $perPage) { pageInfo { total currentPage lastPage hasNextPage } mediaList(type: MANGA, sort: UPDATED_TIME_DESC${status_clause}) { id mediaId status score progress progressVolumes repeat startedAt { year month day } completedAt { year month day } updatedAt notes priority private media { id title { romaji english native } coverImage { large } chapters volumes status } } } }",
+        "variables": {"page": ${page}, "perPage": ${per_page}}
+    }`;
+
+    let headers = #{
+        "Authorization": `Bearer ${auth.access_token}`,
+        "Content-Type": "application/json"
+    };
+
+    let response = http_post_json_with_headers(BASE_URL, query, headers);
+    let json = json_parse(response);
+
+    if json.errors != () {
+        return #{ error: json.errors[0].message };
+    }
+
+    let entries = [];
+    let page_info = json.data.Page.pageInfo;
+    let list = json.data.Page.mediaList;
+
+    if list != () {
+        for item in list {
+            let media = item.media;
+            let title = "";
+            if media.title.english != () && media.title.english != "" {
+                title = media.title.english;
+            } else if media.title.romaji != () {
+                title = media.title.romaji;
+            } else {
+                title = media.title.native;
+            }
+
+            let start_date = ();
+            if item.startedAt != () && item.startedAt.year != () {
+                start_date = `${item.startedAt.year}-${item.startedAt.month}-${item.startedAt.day}`;
+            }
+
+            let finish_date = ();
+            if item.completedAt != () && item.completedAt.year != () {
+                finish_date = `${item.completedAt.year}-${item.completedAt.month}-${item.completedAt.day}`;
+            }
+
+            let entry_cover_url = "";
+            if media.coverImage != () {
+                entry_cover_url = media.coverImage.large;
+            }
+
+            entries.push(#{
+                entry_id: `${item.id}`,
+                manga_id: `${item.mediaId}`,
+                title: title,
+                cover_url: entry_cover_url,
+                status: map_anilist_status(item.status),
+                score: item.score,
+                chapters_read: item.progress,
+                volumes_read: item.progressVolumes,
+                total_chapters: media.chapters,
+                total_volumes: media.volumes,
+                reread_count: item.repeat,
+                start_date: start_date,
+                finish_date: finish_date,
+                updated_at: item.updatedAt,
+                notes: item.notes,
+                priority: item.priority,
+                is_private: item["private"]
+            });
+        }
+    }
+
+    #{
+        entries: entries,
+        has_more: page_info.hasNextPage,
+        total: page_info.total,
+        current_page: page_info.currentPage
+    }
+}
+
+// Get single manga entry from user's list
+fn get_list_entry(manga_id, auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    let query = `{
+        "query": "query ($mediaId: Int) { MediaList(mediaId: $mediaId, type: MANGA) { id mediaId status score progress progressVolumes repeat startedAt { year month day } completedAt { year month day } updatedAt notes media { id title { romaji english } chapters volumes } } }",
+        "variables": {"mediaId": ${manga_id}}
+    }`;
+
+    let headers = #{
+        "Authorization": `Bearer ${auth.access_token}`,
+        "Content-Type": "application/json"
+    };
+
+    let response = http_post_json_with_headers(BASE_URL, query, headers);
+    let json = json_parse(response);
+
+    if json.errors != () {
+        // Check if it's just not in list (expected error)
+        if json.errors[0].message.contains("Not Found") || json.errors[0].status == 404 {
+            return #{ not_in_list: true, manga_id: manga_id };
+        }
+        return #{ error: json.errors[0].message };
+    }
+
+    let item = json.data.MediaList;
+    if item == () {
+        return #{ not_in_list: true, manga_id: manga_id };
+    }
+
+    let media = item.media;
+    let title = "";
+    if media.title.english != () && media.title.english != "" {
+        title = media.title.english;
+    } else {
+        title = media.title.romaji;
+    }
+
+    let entry_start_date = ();
+    if item.startedAt != () && item.startedAt.year != () {
+        entry_start_date = `${item.startedAt.year}-${item.startedAt.month}-${item.startedAt.day}`;
+    }
+
+    let entry_finish_date = ();
+    if item.completedAt != () && item.completedAt.year != () {
+        entry_finish_date = `${item.completedAt.year}-${item.completedAt.month}-${item.completedAt.day}`;
+    }
+
+    #{
+        entry_id: `${item.id}`,
+        manga_id: `${item.mediaId}`,
+        title: title,
+        status: map_anilist_status(item.status),
+        score: item.score,
+        chapters_read: item.progress,
+        volumes_read: item.progressVolumes,
+        total_chapters: media.chapters,
+        total_volumes: media.volumes,
+        reread_count: item.repeat,
+        start_date: entry_start_date,
+        finish_date: entry_finish_date,
+        updated_at: item.updatedAt,
+        notes: item.notes
+    }
+}
+
+// Update manga entry in user's list (or add if not exists)
+fn update_list_entry(manga_id, entry, auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    // Build mutation variables
+    let variables = `"mediaId": ${manga_id}`;
+
+    if entry.status != () && entry.status != "" {
+        let al_status = map_status_to_anilist(entry.status);
+        variables = variables + `, "status": "${al_status}"`;
+    }
+
+    if entry.score != () {
+        variables = variables + `, "score": ${entry.score}`;
+    }
+
+    if entry.chapters_read != () {
+        variables = variables + `, "progress": ${entry.chapters_read}`;
+    }
+
+    if entry.volumes_read != () {
+        variables = variables + `, "progressVolumes": ${entry.volumes_read}`;
+    }
+
+    if entry.reread_count != () {
+        variables = variables + `, "repeat": ${entry.reread_count}`;
+    }
+
+    if entry.notes != () {
+        variables = variables + `, "notes": "${entry.notes}"`;
+    }
+
+    // Use bracket notation for reserved keyword
+    let is_private_val = entry["private"];
+    if is_private_val != () {
+        variables = variables + `, "private": ${is_private_val}`;
+    }
+
+    // Handle dates - AniList uses FuzzyDateInput { year, month, day }
+    if entry.start_date != () && entry.start_date != "" {
+        let parts = entry.start_date.split("-");
+        if parts.len() >= 3 {
+            variables = variables + `, "startedAt": { "year": ${parts[0]}, "month": ${parts[1]}, "day": ${parts[2]} }`;
+        }
+    }
+
+    if entry.finish_date != () && entry.finish_date != "" {
+        let parts = entry.finish_date.split("-");
+        if parts.len() >= 3 {
+            variables = variables + `, "completedAt": { "year": ${parts[0]}, "month": ${parts[1]}, "day": ${parts[2]} }`;
+        }
+    }
+
+    let query = `{
+        "query": "mutation ($mediaId: Int, $status: MediaListStatus, $score: Float, $progress: Int, $progressVolumes: Int, $repeat: Int, $notes: String, $private: Boolean, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) { SaveMediaListEntry(mediaId: $mediaId, status: $status, score: $score, progress: $progress, progressVolumes: $progressVolumes, repeat: $repeat, notes: $notes, private: $private, startedAt: $startedAt, completedAt: $completedAt) { id mediaId status score progress progressVolumes updatedAt } }",
+        "variables": {${variables}}
+    }`;
+
+    let headers = #{
+        "Authorization": `Bearer ${auth.access_token}`,
+        "Content-Type": "application/json"
+    };
+
+    let response = http_post_json_with_headers(BASE_URL, query, headers);
+    let json = json_parse(response);
+
+    if json.errors != () {
+        return #{ success: false, error: json.errors[0].message };
+    }
+
+    let result = json.data.SaveMediaListEntry;
+
+    #{
+        success: true,
+        entry_id: `${result.id}`,
+        manga_id: `${result.mediaId}`,
+        status: map_anilist_status(result.status),
+        score: result.score,
+        chapters_read: result.progress,
+        volumes_read: result.progressVolumes,
+        updated_at: result.updatedAt
+    }
+}
+
+// Remove manga from user's list
+fn remove_list_entry(manga_id, auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    // First get the entry ID
+    let current = get_list_entry(manga_id, auth);
+    if current.not_in_list == true {
+        return #{ success: true, manga_id: manga_id, message: "Entry not in list" };
+    }
+    if current.error != () {
+        return #{ success: false, error: current.error };
+    }
+
+    let entry_id = current.entry_id;
+
+    let query = `{
+        "query": "mutation ($id: Int) { DeleteMediaListEntry(id: $id) { deleted } }",
+        "variables": {"id": ${entry_id}}
+    }`;
+
+    let headers = #{
+        "Authorization": `Bearer ${auth.access_token}`,
+        "Content-Type": "application/json"
+    };
+
+    let response = http_post_json_with_headers(BASE_URL, query, headers);
+    let json = json_parse(response);
+
+    if json.errors != () {
+        return #{ success: false, error: json.errors[0].message };
+    }
+
+    #{
+        success: json.data.DeleteMediaListEntry.deleted,
+        manga_id: manga_id,
+        entry_id: entry_id
+    }
+}
+
+// Sync reading progress from local to AniList
+fn sync_progress(manga_id, progress, auth) {
+    if auth.access_token == () || auth.access_token == "" {
+        return #{ error: "Authentication required", requires_auth: true };
+    }
+
+    // First get current entry to compare
+    let current = get_list_entry(manga_id, auth);
+
+    let entry = #{
+        chapters_read: progress.chapters_read,
+        volumes_read: progress.volumes_read
+    };
+
+    // Auto-set status based on progress if not specified
+    if progress.status != () {
+        entry.status = progress.status;
+    } else if current.not_in_list == true {
+        // New entry - set to reading
+        entry.status = "reading";
+    } else if progress.chapters_read != () && current.total_chapters != () && progress.chapters_read >= current.total_chapters {
+        // Completed all chapters
+        entry.status = "completed";
+    }
+
+    // Auto-set start date if newly reading
+    if current.not_in_list == true && entry.status == "reading" {
+        let today = get_current_date();
+        entry.start_date = today;
+    }
+
+    // Auto-set finish date if completed
+    if entry.status == "completed" && (current.status != "completed" || current.not_in_list == true) {
+        let today = get_current_date();
+        entry.finish_date = today;
+    }
+
+    update_list_entry(manga_id, entry, auth)
+}
+
+// Get recommendations for a series from AniList
+fn get_recommendations(manga_id, auth) {
+    let query = `{
+        "query": "query ($id: Int) { Media(id: $id, type: MANGA) { recommendations { nodes { rating mediaRecommendation { id title { romaji english } coverImage { large } } } } } }",
+        "variables": {"id": ${manga_id}}
+    }`;
+
+    let response = safe_post(query);
+    let json = json_parse(response);
+
+    let recommendations = [];
+
+    if json.data != () && json.data.Media != () && json.data.Media.recommendations != () {
+        for node in json.data.Media.recommendations.nodes {
+            if node.mediaRecommendation != () {
+                let media = node.mediaRecommendation;
+                let title = "";
+                if media.title.english != () && media.title.english != "" {
+                    title = media.title.english;
+                } else {
+                    title = media.title.romaji;
+                }
+
+                let rec_cover_url = "";
+                if media.coverImage != () {
+                    rec_cover_url = media.coverImage.large;
+                }
+
+                recommendations.push(#{
+                    id: `${media.id}`,
+                    title: title,
+                    cover_url: rec_cover_url,
+                    url: `https://anilist.co/manga/${media.id}`,
+                    rating: node.rating
+                });
+            }
+        }
+    }
+
+    #{
+        recommendations: recommendations,
+        total: recommendations.len()
+    }
+}
+
+
+// Login function - validates client credentials are present
+// AniList uses OAuth2 for user tracking, but client credentials enable authenticated API access
+fn login(credentials) {
+    let client_id = if credentials.anilist_client_id != () { credentials.anilist_client_id } else { "" };
+    let client_secret = if credentials.anilist_client_secret != () { credentials.anilist_client_secret } else { "" };
+
+    if client_id == "" {
+        return #{
+            success: false,
+            error: "AniList Client ID is required. Get it from https://anilist.co/settings/developer"
+        };
+    }
+
+    if client_secret == "" {
+        return #{
+            success: false,
+            error: "AniList Client Secret is required. Get it from https://anilist.co/settings/developer"
+        };
+    }
+
+    // Client credentials are valid - they will be used for OAuth2 authorization code flow
+    // Return success so the credentials are stored for later OAuth use
+    #{
+        success: true,
+        session_token: client_id,  // Store client_id as session marker
+        message: "AniList credentials validated. Use OAuth to authorize user tracking."
+    }
+}
