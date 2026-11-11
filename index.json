@@ -1,20 +1,20 @@
 {
-  "version": 91,
-  "updated_at": "2026-07-22T09:39:15Z",
+  "version": 92,
+  "updated_at": "2026-11-11T20:41:47Z",
   "addons": [
     {
       "id": "anilist",
       "name": "AniList",
-      "version": "2.0.13",
+      "version": "2.1.0",
       "description": "AniList metadata provider - provides manga metadata, tracking, and ID resolution. Supports reading list sync with OAuth2.",
       "author": "Tsubaki Team",
       "technology": "rhai",
       "addon_type": "metadata",
       "nsfw": false,
       "icon_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/anilist/icon.png",
-      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/anilist/anilist_2-0-13.zip",
+      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/anilist/anilist_2-1-0.zip",
       "manifest_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/anilist/manifest.json",
-      "latest_version": "2.0.13",
+      "latest_version": "2.1.0",
       "versions": {
         "2.0.8": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/anilist/anilist_2-0-8.zip",
@@ -45,22 +45,27 @@
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/anilist/anilist_2-0-13.zip",
           "released_at": "2026-05-20T12:34:11Z",
           "changelog": "Updated"
+        },
+        "2.1.0": {
+          "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/anilist/anilist_2-1-0.zip",
+          "released_at": "2026-11-11T20:41:47Z",
+          "changelog": "Updated"
         }
       }
     },
     {
       "id": "kitsu",
       "name": "Kitsu",
-      "version": "1.1.8",
+      "version": "1.2.0",
       "description": "Metadata provider for Kitsu - anime and manga tracking database with social features, ratings, and recommendations. Supports OAuth for 18+ content and tracking.",
       "author": "Tsubaki Team",
       "technology": "rhai",
       "addon_type": "metadata",
       "nsfw": false,
       "icon_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/kitsu/icon.png",
-      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/kitsu/kitsu_1-1-8.zip",
+      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/kitsu/kitsu_1-2-0.zip",
       "manifest_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/kitsu/manifest.json",
-      "latest_version": "1.1.8",
+      "latest_version": "1.2.0",
       "versions": {
         "1.1.3": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/kitsu/kitsu_1-1-3.zip",
@@ -86,6 +91,11 @@
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/kitsu/kitsu_1-1-8.zip",
           "released_at": "2026-05-20T12:28:22Z",
           "changelog": "Updated"
+        },
+        "1.2.0": {
+          "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/kitsu/kitsu_1-2-0.zip",
+          "released_at": "2026-11-11T20:41:47Z",
+          "changelog": "Updated"
         }
       },
       "previous_ids": [
@@ -95,16 +105,16 @@
     {
       "id": "mangaupdates",
       "name": "MangaUpdates",
-      "version": "1.1.7",
+      "version": "1.2.0",
       "description": "Metadata provider for MangaUpdates - comprehensive manga database with release tracking, reviews, and detailed series information.",
       "author": "Tsubaki Team",
       "technology": "rhai",
       "addon_type": "metadata",
       "nsfw": false,
       "icon_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/mangaupdates/icon.png",
-      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/mangaupdates/mangaupdates_1-1-7.zip",
+      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/mangaupdates/mangaupdates_1-2-0.zip",
       "manifest_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/mangaupdates/manifest.json",
-      "latest_version": "1.1.7",
+      "latest_version": "1.2.0",
       "versions": {
         "1.1.3": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/mangaupdates/mangaupdates_1-1-3.zip",
@@ -130,6 +140,11 @@
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/mangaupdates/mangaupdates_1-1-7.zip",
           "released_at": "2026-05-20T12:28:22Z",
           "changelog": "Updated"
+        },
+        "1.2.0": {
+          "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/mangaupdates/mangaupdates_1-2-0.zip",
+          "released_at": "2026-11-11T20:41:47Z",
+          "changelog": "Updated"
         }
       },
       "previous_ids": [
@@ -139,16 +154,16 @@
     {
       "id": "myanimelist",
       "name": "MyAnimeList",
-      "version": "2.0.9",
+      "version": "2.1.0",
       "description": "MyAnimeList metadata provider - provides manga metadata via Jikan API and reading list tracking via official MAL API v2.",
       "author": "Tsubaki Team",
       "technology": "rhai",
       "addon_type": "metadata",
       "nsfw": false,
       "icon_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/myanimelist/icon.png",
-      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-0-9.zip",
+      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-0.zip",
       "manifest_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/myanimelist/manifest.json",
-      "latest_version": "2.0.9",
+      "latest_version": "2.1.0",
       "versions": {
         "2.0.7": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-0-7.zip",
@@ -163,6 +178,11 @@
         "2.0.9": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-0-9.zip",
           "released_at": "2026-05-20T12:28:22Z",
+          "changelog": "Updated"
+        },
+        "2.1.0": {
+          "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-0.zip",
+          "released_at": "2026-11-11T20:41:47Z",
           "changelog": "Updated"
         }
       }

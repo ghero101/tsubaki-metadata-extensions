@@ -43,407 +43,206 @@ fn normalize_status(raw) {
     raw
 }
 
-// Search for manga series
-fn search_series(query, page, auth) {
-    let url = `${BASE_URL}/manga?q=${url_encode(query)}&page=${page}&limit=20`;
-    let response = http_get(url);
-    let json = json_parse(response);
+// ----------------------------------------------------------------------------
+// Shared item mapping
+//
+// Search, browse and get_series all map Jikan's manga object through
+// item_to_series(), so list results carry the same ids and metadata as a full
+// lookup (the browse catalog stores list items as-is).
+// ----------------------------------------------------------------------------
 
-    let series = [];
-
-    if json.data != () {
-        for item in json.data {
-            let alt_titles = [];
-            if item.title_english != () && item.title_english != item.title {
-                alt_titles.push(item.title_english);
-            }
-            if item.title_japanese != () {
-                alt_titles.push(item.title_japanese);
-            }
-
-            let cover_url = "";
-            if item.images != () && item.images.jpg != () {
-                if item.images.jpg.large_image_url != () {
-                    cover_url = item.images.jpg.large_image_url;
-                } else if item.images.jpg.image_url != () {
-                    cover_url = item.images.jpg.image_url;
-                }
-            }
-
-            // Extract genres
-            let genres = [];
-            if item.genres != () {
-                for g in item.genres {
-                    genres.push(g.name);
-                }
-            }
-
-            // Map MAL rating to standard format
-            let rating = "safe";
-            if item.rating != () {
-                let mal_rating = item.rating.to_lower();
-                if mal_rating.contains("rx") || mal_rating.contains("hentai") {
-                    rating = "adult";
-                } else if mal_rating.contains("r+") || mal_rating.contains("r -") {
-                    rating = "mature";
-                } else if mal_rating.contains("pg-13") {
-                    rating = "suggestive";
-                }
-            }
-
-            // Extract authors
-            let authors = [];
-            if item.authors != () {
-                for a in item.authors {
-                    authors.push(a.name);
-                }
-            }
-
-            series.push(#{
-                id: `${item.mal_id}`,
-                title: item.title,
-                alternate_titles: alt_titles,
-                description: item.synopsis,
-                cover_url: cover_url,
-                authors: authors,
-                artists: [],
-                status: normalize_status(item.status),
-                genres: genres,
-                tags: [],
-                year: item.published.prop.from.year,
-                content_rating: rating,
-                url: item.url
-            });
-        }
-    }
-
-    let has_more = false;
-    if json.pagination != () {
-        has_more = json.pagination.has_next_page;
-    }
-
-    #{
-        series: series,
-        has_more: has_more,
-        total: if json.pagination != () { json.pagination.items.total } else { 0 },
-        current_page: page
-    }
+// Host pages are 1-based for search and browse alike.
+fn page_or_one(page) {
+    if page == () || page < 1 { 1 } else { page }
 }
 
-// Get detailed series information by ID
-fn get_series(id_or_url, auth) {
-    // Extract ID from URL if needed
-    let id = id_or_url;
-    if id_or_url.contains("myanimelist.net/manga/") {
-        let parts = id_or_url.split("/manga/");
-        if parts.len() > 1 {
-            id = parts[1].split("/")[0];
-        }
+// GET a Jikan URL and parse it; () on any network or parse failure.
+fn jikan_get(url) {
+    let response = "";
+    try { response = http_get(url); } catch { return (); }
+    if response == () || response == "" { return (); }
+    let json = ();
+    try { json = json_parse(response); } catch { return (); }
+    json
+}
+
+// MAL lists people as "Last, First"; flip to "First Last" so names match the
+// other providers when the backend merges authors.
+fn person_name(raw) {
+    let s = `${raw}`.trim();
+    let parts = s.split(", ");
+    if parts.len() == 2 { return `${parts[1]} ${parts[0]}`; }
+    s
+}
+
+fn names_of(list) {
+    let out = [];
+    if list == () { return out; }
+    for x in list {
+        if x != () && x.name != () && !out.contains(x.name) { out.push(x.name); }
     }
+    out
+}
 
-    let url = `${BASE_URL}/manga/${id}/full`;
-    let response = http_get(url);
-    let json = json_parse(response);
-
-    if json.data == () {
-        return ();
+// Jikan's manga objects carry no age rating, so derive it from genres.
+fn rating_from(item) {
+    let all = names_of(item.genres) + names_of(item.explicit_genres);
+    for g in all {
+        let l = g.to_lower();
+        if l == "hentai" || l == "erotica" { return "adult"; }
     }
+    for g in all {
+        if g.to_lower() == "ecchi" { return "suggestive"; }
+    }
+    "safe"
+}
 
-    let item = json.data;
+fn item_to_series(item) {
+    let title = if item.title != () { item.title } else { "" };
 
     let alt_titles = [];
-    if item.title_english != () && item.title_english != item.title {
-        alt_titles.push(item.title_english);
+    for v in [item.title_english, item.title_japanese] {
+        if v != () && v != "" && v != title && !alt_titles.contains(v) { alt_titles.push(v); }
     }
-    if item.title_japanese != () {
-        alt_titles.push(item.title_japanese);
-    }
-    // Add title synonyms
     if item.title_synonyms != () {
-        for syn in item.title_synonyms {
-            alt_titles.push(syn);
+        for v in item.title_synonyms {
+            if v != () && v != "" && v != title && !alt_titles.contains(v) { alt_titles.push(v); }
         }
     }
 
     let cover_url = "";
-    if item.images != () && item.images.jpg != () {
-        if item.images.jpg.large_image_url != () {
-            cover_url = item.images.jpg.large_image_url;
-        } else if item.images.jpg.image_url != () {
-            cover_url = item.images.jpg.image_url;
-        }
+    if item.images != () {
+        let i = item.images;
+        if i.webp != () && i.webp.large_image_url != () { cover_url = i.webp.large_image_url; }
+        else if i.jpg != () && i.jpg.large_image_url != () { cover_url = i.jpg.large_image_url; }
+        else if i.jpg != () && i.jpg.image_url != () { cover_url = i.jpg.image_url; }
     }
 
-    // Extract genres
-    let genres = [];
-    if item.genres != () {
-        for g in item.genres {
-            genres.push(g.name);
-        }
-    }
+    let tags = names_of(item.themes) + names_of(item.demographics);
 
-    // Extract themes as tags
-    let tags = [];
-    if item.themes != () {
-        for t in item.themes {
-            tags.push(t.name);
-        }
-    }
-    if item.demographics != () {
-        for d in item.demographics {
-            tags.push(d.name);
-        }
-    }
-
-    // Map MAL rating to standard format
-    let rating = "safe";
-    if item.rating != () {
-        let mal_rating = item.rating.to_lower();
-        if mal_rating.contains("rx") || mal_rating.contains("hentai") {
-            rating = "adult";
-        } else if mal_rating.contains("r+") || mal_rating.contains("r -") {
-            rating = "mature";
-        } else if mal_rating.contains("pg-13") {
-            rating = "suggestive";
-        }
-    }
-
-    // Extract authors and artists
     let authors = [];
-    let artists = [];
     if item.authors != () {
         for a in item.authors {
-            authors.push(a.name);
+            if a.name != () { authors.push(person_name(a.name)); }
         }
     }
 
-    // Get publication year
     let year = ();
-    if item.published != () && item.published.prop != () && item.published.prop.from != () {
-        year = item.published.prop.from.year;
+    let start_date = ();
+    let end_date = ();
+    if item.published != () {
+        if item.published.prop != () && item.published.prop.from != () {
+            year = item.published.prop.from.year;
+        }
+        start_date = item.published.from;
+        end_date = item.published.to;
+    }
+
+    let links = [];
+    let external_ids = #{ mal: item.mal_id };
+    if item.external != () {
+        for l in item.external {
+            if l.url == () { continue; }
+            links.push(#{ site: l.name, url: l.url });
+            // MAL's external links often include the MangaUpdates and AniList
+            // pages; lift their ids so the backend can link without searching.
+            let u = `${l.url}`;
+            if u.contains("anilist.co/manga/") {
+                let id = u.split("anilist.co/manga/")[1].split("/")[0];
+                if id != "" { external_ids.anilist = id; }
+            }
+            if u.contains("mangaupdates.com/series") {
+                let rest = u.split("mangaupdates.com/series")[1];
+                let raw = if rest.starts_with(".html?id=") { rest.split("id=")[1].split("&")[0] } else { rest.split("/")[1] };
+                let mu = mangaupdates_id(raw);
+                if mu.id != () { external_ids.mangaupdates = mu.id; }
+                if mu.legacy != () { external_ids.mangaupdates_legacy = mu.legacy; }
+            }
+        }
     }
 
     #{
         id: `${item.mal_id}`,
-        title: item.title,
+        title: title,
         alternate_titles: alt_titles,
         description: item.synopsis,
         cover_url: cover_url,
         authors: authors,
-        artists: artists,
+        artists: [],
         status: normalize_status(item.status),
-        genres: genres,
+        genres: names_of(item.genres) + names_of(item.explicit_genres),
         tags: tags,
         year: year,
-        content_rating: rating,
-        url: item.url,
+        content_rating: rating_from(item),
+        chapter_count: item.chapters,
+        url: if item.url != () { item.url } else { `https://myanimelist.net/manga/${item.mal_id}` },
         extra: #{
-            volumes: item.volumes,
-            chapters: item.chapters,
+            provider: "mal",
+            provider_id: `${item.mal_id}`,
+            mal_id: item.mal_id,
+            external_ids: external_ids,
+            format: item.type,
             score: item.score,
             scored_by: item.scored_by,
             rank: item.rank,
             popularity: item.popularity,
-            provider: "mal",
-            provider_id: `${item.mal_id}`
+            members: item.members,
+            volumes: item.volumes,
+            chapters: item.chapters,
+            start_date: start_date,
+            end_date: end_date,
+            serializations: names_of(item.serializations),
+            background: item.background,
+            links: links
         }
     }
 }
 
-// Get latest/trending manga (for browse)
+// Map a Jikan list response into a SearchResult.
+fn list_result(json, page) {
+    if json == () || json.data == () {
+        return #{ series: [], has_more: false, total: () };
+    }
+    let series = [];
+    for item in json.data { series.push(item_to_series(item)); }
+    let p = json.pagination;
+    #{
+        series: series,
+        has_more: if p != () && p.has_next_page == true { true } else { false },
+        total: if p != () && p.items != () { p.items.total } else { () },
+        current_page: page
+    }
+}
+
+// Search for manga series
+fn search_series(query, page, auth) {
+    let p = page_or_one(page);
+    let url = `${BASE_URL}/manga?q=${url_encode(query)}&page=${p}&limit=20&order_by=popularity&sort=asc`;
+    list_result(jikan_get(url), p)
+}
+
+// Get detailed series information by ID or myanimelist.net URL
+fn get_series(id_or_url, auth) {
+    let id = `${id_or_url}`;
+    if id.contains("myanimelist.net/manga/") {
+        id = id.split("/manga/")[1].split("/")[0];
+    }
+    let json = jikan_get(`${BASE_URL}/manga/${id}/full`);
+    if json == () || json.data == () { return (); }
+    item_to_series(json.data)
+}
+
+// Browse: top manga that are currently publishing. (The old listing sorted by
+// start_date desc, which surfaced unreleased and junk entries first.)
 fn get_latest_updates(page, auth) {
-    // Jikan API: order by start_date descending for recent manga
-    let url = `${BASE_URL}/manga?order_by=start_date&sort=desc&page=${page + 1}&limit=25`;
-
-    let response = http_get(url);
-    let json = json_parse(response);
-
-    let series = [];
-
-    if json == () || json["data"] == () {
-        return #{ series: [], has_more: false, total: () };
-    }
-
-    let data = json["data"];
-
-    for item in data {
-        let alt_titles = [];
-        if item["title_english"] != () && item["title_english"] != item["title"] {
-            alt_titles.push(item["title_english"]);
-        }
-        if item["title_japanese"] != () {
-            alt_titles.push(item["title_japanese"]);
-        }
-
-        let cover_url = "";
-        if item["images"] != () && item["images"]["jpg"] != () {
-            if item["images"]["jpg"]["large_image_url"] != () {
-                cover_url = item["images"]["jpg"]["large_image_url"];
-            } else if item["images"]["jpg"]["image_url"] != () {
-                cover_url = item["images"]["jpg"]["image_url"];
-            }
-        }
-
-        // Extract genres
-        let genres = [];
-        if item["genres"] != () {
-            for g in item["genres"] {
-                genres.push(g["name"]);
-            }
-        }
-
-        // Map MAL rating to standard format
-        let rating = "safe";
-        if item["rating"] != () {
-            let mal_rating = item["rating"].to_lower();
-            if mal_rating.contains("rx") || mal_rating.contains("hentai") {
-                rating = "adult";
-            } else if mal_rating.contains("r+") || mal_rating.contains("r -") {
-                rating = "mature";
-            } else if mal_rating.contains("pg-13") {
-                rating = "suggestive";
-            }
-        }
-
-        // Extract authors
-        let authors = [];
-        if item["authors"] != () {
-            for a in item["authors"] {
-                authors.push(a["name"]);
-            }
-        }
-
-        // Get publication year
-        let year = ();
-        if item["published"] != () && item["published"]["prop"] != () && item["published"]["prop"]["from"] != () {
-            year = item["published"]["prop"]["from"]["year"];
-        }
-
-        series.push(#{
-            id: item["mal_id"].to_string(),
-            title: item["title"],
-            alternate_titles: alt_titles,
-            description: item["synopsis"],
-            cover_url: cover_url,
-            authors: authors,
-            artists: [],
-            status: normalize_status(item["status"]),
-            genres: genres,
-            tags: [],
-            year: year,
-            content_rating: rating,
-            url: item["url"]
-        });
-    }
-
-    let has_more = false;
-    if json["pagination"] != () {
-        has_more = json["pagination"]["has_next_page"];
-    }
-
-    #{
-        series: series,
-        has_more: has_more,
-        total: if json["pagination"] != () { json["pagination"]["items"]["total"] } else { () }
-    }
+    let p = page_or_one(page);
+    list_result(jikan_get(`${BASE_URL}/top/manga?filter=publishing&page=${p}&limit=25`), p)
 }
 
-// Get popular manga
+// Most popular manga
 fn get_popular(page, auth) {
-    // Jikan API: order by score descending for top rated manga
-    let url = `${BASE_URL}/manga?order_by=score&sort=desc&page=${page + 1}&limit=25&min_score=1`;
-
-    let response = http_get(url);
-    let json = json_parse(response);
-
-    let series = [];
-
-    if json == () || json["data"] == () {
-        return #{ series: [], has_more: false, total: () };
-    }
-
-    let data = json["data"];
-
-    for item in data {
-        let alt_titles = [];
-        if item["title_english"] != () && item["title_english"] != item["title"] {
-            alt_titles.push(item["title_english"]);
-        }
-        if item["title_japanese"] != () {
-            alt_titles.push(item["title_japanese"]);
-        }
-
-        let cover_url = "";
-        if item["images"] != () && item["images"]["jpg"] != () {
-            if item["images"]["jpg"]["large_image_url"] != () {
-                cover_url = item["images"]["jpg"]["large_image_url"];
-            } else if item["images"]["jpg"]["image_url"] != () {
-                cover_url = item["images"]["jpg"]["image_url"];
-            }
-        }
-
-        // Extract genres
-        let genres = [];
-        if item["genres"] != () {
-            for g in item["genres"] {
-                genres.push(g["name"]);
-            }
-        }
-
-        // Map MAL rating to standard format
-        let rating = "safe";
-        if item["rating"] != () {
-            let mal_rating = item["rating"].to_lower();
-            if mal_rating.contains("rx") || mal_rating.contains("hentai") {
-                rating = "adult";
-            } else if mal_rating.contains("r+") || mal_rating.contains("r -") {
-                rating = "mature";
-            } else if mal_rating.contains("pg-13") {
-                rating = "suggestive";
-            }
-        }
-
-        // Extract authors
-        let authors = [];
-        if item["authors"] != () {
-            for a in item["authors"] {
-                authors.push(a["name"]);
-            }
-        }
-
-        // Get publication year
-        let year = ();
-        if item["published"] != () && item["published"]["prop"] != () && item["published"]["prop"]["from"] != () {
-            year = item["published"]["prop"]["from"]["year"];
-        }
-
-        series.push(#{
-            id: item["mal_id"].to_string(),
-            title: item["title"],
-            alternate_titles: alt_titles,
-            description: item["synopsis"],
-            cover_url: cover_url,
-            authors: authors,
-            artists: [],
-            status: normalize_status(item["status"]),
-            genres: genres,
-            tags: [],
-            year: year,
-            content_rating: rating,
-            url: item["url"]
-        });
-    }
-
-    let has_more = false;
-    if json["pagination"] != () {
-        has_more = json["pagination"]["has_next_page"];
-    }
-
-    #{
-        series: series,
-        has_more: has_more,
-        total: if json["pagination"] != () { json["pagination"]["items"]["total"] } else { () }
-    }
+    let p = page_or_one(page);
+    list_result(jikan_get(`${BASE_URL}/top/manga?filter=bypopularity&page=${p}&limit=25`), p)
 }
 
 // Resolve manga title to MAL ID
@@ -834,4 +633,22 @@ fn login(credentials) {
         session_token: client_id,  // Store client_id as session marker
         message: "MAL credentials validated. Use OAuth to authorize user tracking."
     }
+}
+
+// MangaUpdates ids: current pages use a base36 slug ("pb8uwds") that encodes
+// the numeric API id (55099564912); old "series.html?id=33" ids are a separate
+// legacy numbering the v1 API doesn't accept. Returns #{ id } for a slug, or
+// #{ legacy } for an all-digit legacy id.
+fn mangaupdates_id(raw) {
+    let s = `${raw}`.trim().to_lower();
+    if s == "" { return #{}; }
+    let all_digits = true;
+    for c in s.chars() { if c < '0' || c > '9' { all_digits = false; break; } }
+    if all_digits { return #{ legacy: s }; }
+    let n = 0;
+    for c in s.chars() {
+        let v = if c >= '0' && c <= '9' { c.to_int() - 48 } else if c >= 'a' && c <= 'z' { c.to_int() - 87 } else { return #{}; };
+        n = n * 36 + v;
+    }
+    #{ id: `${n}` }
 }

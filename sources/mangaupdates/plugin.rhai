@@ -27,316 +27,191 @@ fn get_source_info() {
     }
 }
 
-/// Search for series matching query
-fn search_series(query, page, auth) {
-    let url = `${API_BASE}/series/search`;
+// ----------------------------------------------------------------------------
+// Shared record mapping: search results, browse listings and get_series all go
+// through record_to_series(), so list items carry the same ids and metadata as
+// a full lookup (the browse catalog stores list items as-is).
+// ----------------------------------------------------------------------------
 
-    // MangaUpdates uses POST for search
-    let body = #{
-        search: query,
-        page: page,
-        perpage: 25
-    };
-
-    let response = http_post_json(url, json_stringify(body));
-    let data = json_parse(response);
-
-    let series = [];
-
-    if data == () {
-        return #{ series: [], has_more: false, total: 0 };
-    }
-
-    let results = data["results"];
-    if results == () {
-        return #{ series: [], has_more: false, total: 0 };
-    }
-
-    for item in results {
-        let record = item["record"];
-        if record == () {
-            continue;
-        }
-
-        let series_id = record["series_id"];
-        let title = record["title"];
-        let url = record["url"];
-        let description = record["description"];
-        let image = record["image"];
-        let year = record["year"];
-        let bayesian_rating = record["bayesian_rating"];
-
-        // Extract cover URL - API returns image.url.original or image.url.thumb
-        let cover_url = ();
-        if image != () {
-            let url_obj = image["url"];
-            if url_obj != () {
-                // url_obj is an object with original/thumb
-                if type_of(url_obj) == "map" {
-                    cover_url = url_obj["original"];
-                    if cover_url == () {
-                        cover_url = url_obj["thumb"];
-                    }
-                } else {
-                    // Fallback if it's just a string
-                    cover_url = url_obj;
-                }
-            }
-        }
-
-        // Extract genres
-        let genres = [];
-        let genre_list = record["genres"];
-        if genre_list != () {
-            for g in genre_list {
-                let genre_name = g["genre"];
-                if genre_name != () {
-                    genres.push(genre_name);
-                }
-            }
-        }
-
-        // Extract authors
-        let authors = [];
-        let author_list = record["authors"];
-        if author_list != () {
-            for a in author_list {
-                let author_name = a["name"];
-                if author_name != () {
-                    authors.push(author_name);
-                }
-            }
-        }
-
-        // Extract status. MangaUpdates uses "Complete" rather than the
-        // canonical "Completed" the rest of our plugins emit — map it so
-        // UI filters work consistently across sources.
-        let status = ();
-        let status_val = record["status"];
-        if status_val != () {
-            let s_lower = `${status_val}`.to_lower().trim();
-            if s_lower == "complete" {
-                status = "Completed";
-            } else if s_lower == "ongoing" {
-                status = "Ongoing";
-            } else if s_lower == "hiatus" {
-                status = "Hiatus";
-            } else if s_lower == "cancelled" || s_lower == "canceled" || s_lower == "discontinued" {
-                status = "Cancelled";
-            } else {
-                status = status_val;
-            }
-        }
-
-        series.push(#{
-            id: `${series_id}`,
-            title: title,
-            url: url,
-            cover_url: cover_url,
-            alternate_titles: [],
-            authors: authors,
-            artists: [],
-            status: status,
-            genres: genres,
-            tags: [],
-            description: description,
-            year: year,
-            rating: bayesian_rating,
-            extra: #{
-                mangaupdates_id: series_id
-            }
-        });
-    }
-
-    // Check pagination
-    let total_hits = data["total_hits"];
-    let has_more = results.len() >= 25 && (page * 25) < total_hits;
-
-    #{ series: series, has_more: has_more, total: total_hits }
+fn page_or_one(page) {
+    if page == () || page < 1 { 1 } else { page }
 }
 
-/// Get detailed series information
-fn get_series(id_or_url, auth) {
-    let series_id = id_or_url;
-
-    // Extract ID from URL if needed
-    if id_or_url.contains("mangaupdates.com") {
-        // URL format: https://www.mangaupdates.com/series/xxxxx/series-name
-        let parts = id_or_url.split("/series/");
-        if parts.len() > 1 {
-            let id_part = parts[1].split("/")[0];
-            series_id = id_part;
-        }
-    }
-
-    let url = `${API_BASE}/series/${series_id}`;
-    // Wrap the HTTP call so a network exception falls through to an error
-    // result instead of propagating up and crashing get_series.
+fn mu_post(path, body) {
     let response = "";
-    try {
-        response = http_get(url);
-    } catch {}
-
+    try { response = http_post_json(`${API_BASE}${path}`, json_stringify(body)); } catch { return (); }
+    if response == () || response == "" { return (); }
     let data = ();
     try { data = json_parse(response); } catch {}
+    data
+}
 
-    if data == () {
-        return #{
-            id: series_id,
-            title: "",
-            error: "Series not found"
-        };
+fn mu_get(path) {
+    let response = "";
+    try { response = http_get(`${API_BASE}${path}`); } catch { return (); }
+    if response == () || response == "" { return (); }
+    let data = ();
+    try { data = json_parse(response); } catch {}
+    data
+}
+
+// "113 Volumes (Ongoing)" / "Complete" / "4 Volumes (Hiatus)" -> canonical.
+fn map_status(raw, completed) {
+    if completed == true { return "Completed"; }
+    if raw == () || raw == "" { return (); }
+    let s = `${raw}`.to_lower();
+    if s.contains("ongoing") { return "Ongoing"; }
+    if s.contains("hiatus") { return "Hiatus"; }
+    if s.contains("cancel") || s.contains("discontinued") || s.contains("dropped") { return "Cancelled"; }
+    if s.contains("complete") { return "Completed"; }
+    raw
+}
+
+fn rating_from_genres(genres) {
+    let adult = false;
+    let mature = false;
+    for g in genres {
+        let l = g.to_lower();
+        if l == "hentai" || l == "adult" || l == "smut" { adult = true; }
+        if l == "mature" || l == "ecchi" { mature = true; }
     }
+    if adult { "adult" } else if mature { "suggestive" } else { "safe" }
+}
 
-    let title = data["title"];
-    let description = data["description"];
-    let url_link = data["url"];
-    let year = data["year"];
-    let bayesian_rating = data["bayesian_rating"];
-    let status_in_country = data["status"];
-    let licensed = data["licensed"];
-    let completed = data["completed"];
+// Turn a base36 MangaUpdates slug ("pb8uwds") into the numeric API id.
+fn slug_to_id(slug) {
+    let s = `${slug}`.trim().to_lower();
+    let n = 0;
+    for c in s.chars() {
+        let v = if c >= '0' && c <= '9' { c.to_int() - 48 } else if c >= 'a' && c <= 'z' { c.to_int() - 87 } else { return s; };
+        n = n * 36 + v;
+    }
+    `${n}`
+}
 
-    // Extract cover - API returns image.url.original or image.url.thumb
+fn record_to_series(record) {
+    let series_id = `${record.series_id}`;
+    let title = if record.title != () { record.title } else { "" };
+
     let cover_url = ();
-    let image = data["image"];
-    if image != () {
-        let url_obj = image["url"];
-        if url_obj != () {
-            if type_of(url_obj) == "map" {
-                cover_url = url_obj["original"];
-                if cover_url == () {
-                    cover_url = url_obj["thumb"];
-                }
-            } else {
-                cover_url = url_obj;
-            }
-        }
+    if record.image != () && record.image.url != () {
+        let u = record.image.url;
+        cover_url = if type_of(u) == "map" { if u.original != () { u.original } else { u.thumb } } else { u };
     }
 
-    // Extract alternate titles
-    let alt_titles = [];
-    let associated = data["associated"];
-    if associated != () {
-        for a in associated {
-            let alt_title = a["title"];
-            if alt_title != () && alt_title != title {
-                alt_titles.push(alt_title);
-            }
-        }
-    }
-
-    // Extract authors
-    let authors = [];
-    let author_list = data["authors"];
-    if author_list != () {
-        for a in author_list {
-            let author_name = a["name"];
-            let author_type = a["type"];
-            if author_name != () && (author_type == () || author_type == "Author") {
-                authors.push(author_name);
-            }
-        }
-    }
-
-    // Extract artists
-    let artists = [];
-    if author_list != () {
-        for a in author_list {
-            let artist_name = a["name"];
-            let artist_type = a["type"];
-            if artist_name != () && artist_type == "Artist" {
-                artists.push(artist_name);
-            }
-        }
-    }
-
-    // Extract genres
     let genres = [];
-    let genre_list = data["genres"];
-    if genre_list != () {
-        for g in genre_list {
-            let genre_name = g["genre"];
-            if genre_name != () {
-                genres.push(genre_name);
+    if record.genres != () {
+        for g in record.genres { if g.genre != () { genres.push(g.genre); } }
+    }
+
+    let alt_titles = [];
+    if record.associated != () {
+        for a in record.associated {
+            if a.title != () && a.title != title && !alt_titles.contains(a.title) { alt_titles.push(a.title); }
+        }
+    }
+
+    let authors = [];
+    let artists = [];
+    if record.authors != () {
+        for a in record.authors {
+            if a.name == () { continue; }
+            if a.type == "Artist" {
+                if !artists.contains(a.name) { artists.push(a.name); }
+            } else if !authors.contains(a.name) {
+                authors.push(a.name);
             }
         }
     }
 
-    // Extract categories/tags — only include categories with enough votes to be reliable
+    // Only categories with a few votes, to keep single-user noise out.
     let tags = [];
-    let categories = data["categories"];
-    if categories != () {
-        for c in categories {
-            let cat_name = c["category"];
-            let cat_votes = c["votes"];
-            // Require at least 3 votes to filter out noise from single-user tags
-            let votes_ok = cat_votes == () || cat_votes >= 3;
-            if cat_name != () && votes_ok {
-                tags.push(cat_name);
-            }
+    if record.categories != () {
+        for c in record.categories {
+            if c.category != () && (c.votes == () || c.votes >= 3) { tags.push(c.category); }
         }
     }
 
-    // Determine status. completed=true short-circuits to "Completed".
-    // Otherwise the free-form status_in_country string ("Complete",
-    // "Ongoing", etc.) is mapped to the canonical set the UI filters on,
-    // mirroring search_series.
-    let status = ();
-    if completed == true {
-        status = "Completed";
-    } else if status_in_country != () {
-        let s_lower = `${status_in_country}`.to_lower().trim();
-        if s_lower == "complete" {
-            status = "Completed";
-        } else if s_lower == "ongoing" {
-            status = "Ongoing";
-        } else if s_lower == "hiatus" {
-            status = "Hiatus";
-        } else if s_lower == "cancelled" || s_lower == "canceled" || s_lower == "discontinued" {
-            status = "Cancelled";
-        } else {
-            status = status_in_country;
-        }
-    }
-
-    // Extract type (manga, manhwa, etc.)
-    let series_type = data["type"];
-
-    // Extract publishers
     let publishers = [];
-    let pub_list = data["publishers"];
-    if pub_list != () {
-        for p in pub_list {
-            let pub_name = p["publisher_name"];
-            if pub_name != () {
-                publishers.push(pub_name);
+    if record.publishers != () {
+        for p in record.publishers {
+            if p.publisher_name != () {
+                publishers.push(#{ name: p.publisher_name, type: p.type });
             }
         }
     }
+
+    let year = ();
+    if record.year != () && record.year != "" { year = parse_int(`${record.year}`); }
 
     #{
         id: series_id,
         title: title,
         alternate_titles: alt_titles,
-        description: description,
+        description: record.description,
         cover_url: cover_url,
         authors: authors,
         artists: artists,
-        status: status,
+        status: map_status(record.status, record.completed),
         genres: genres,
         tags: tags,
         year: year,
-        content_rating: (),
-        url: url_link,
+        content_rating: rating_from_genres(genres),
+        chapter_count: record.latest_chapter,
+        url: if record.url != () { record.url } else { `https://www.mangaupdates.com/series/${series_id}` },
         extra: #{
+            provider: "mangaupdates",
+            provider_id: series_id,
             mangaupdates_id: series_id,
-            rating: bayesian_rating,
-            type: series_type,
-            licensed: licensed,
-            publishers: publishers
+            external_ids: #{ mangaupdates: series_id },
+            format: record.type,
+            score: record.bayesian_rating,
+            rating_votes: record.rating_votes,
+            latest_chapter: record.latest_chapter,
+            licensed: record.licensed,
+            completed: record.completed,
+            status_raw: record.status,
+            publishers: publishers,
+            anime: record.anime,
+            rank: record.rank
         }
     }
+}
+
+fn search_result(data, page) {
+    if data == () || data.results == () {
+        return #{ series: [], has_more: false, total: 0 };
+    }
+    let series = [];
+    for item in data.results {
+        if item.record != () { series.push(record_to_series(item.record)); }
+    }
+    let total = if data.total_hits != () { data.total_hits } else { 0 };
+    #{ series: series, has_more: series.len() >= 25 && (page * 25) < total, total: total }
+}
+
+/// Search for series matching query (MangaUpdates search is a POST)
+fn search_series(query, page, auth) {
+    let p = page_or_one(page);
+    search_result(mu_post("/series/search", #{ search: query, page: p, perpage: 25 }), p)
+}
+
+/// Get detailed series information by numeric id, base36 slug, or URL
+fn get_series(id_or_url, auth) {
+    let series_id = `${id_or_url}`;
+    if series_id.contains("mangaupdates.com/series/") {
+        series_id = series_id.split("/series/")[1].split("/")[0];
+    }
+    // Page URLs carry the base36 slug; the API wants the number.
+    let numeric = true;
+    for c in series_id.chars() { if c < '0' || c > '9' { numeric = false; break; } }
+    if !numeric { series_id = slug_to_id(series_id); }
+
+    let data = mu_get(`/series/${series_id}`);
+    if data == () || data.series_id == () {
+        return #{ id: series_id, title: "", error: "Series not found" };
+    }
+    record_to_series(data)
 }
 
 /// Get chapters - not applicable for metadata-only source
@@ -349,25 +224,23 @@ fn get_chapter_pages(chapter_id, auth) {
     []
 }
 
-/// Get latest updates - returns popular series via search
-/// MangaUpdates API releases endpoint has complex response format,
-/// so we use search with "manga" to get popular/browseable results
+/// Browse: series trending this week. (Was a literal search for "manga".)
 fn get_latest_updates(page, auth) {
-    // Use search_series which has correct parsing for MangaUpdates API
-    search_series("manga", page, auth)
+    let p = page_or_one(page);
+    search_result(mu_post("/series/search", #{ orderby: "week_pos", page: p, perpage: 25 }), p)
 }
 
-/// Browse popular/trending series
-/// MangaUpdates API requires a search term, so we use common letter patterns
-/// to get a broad selection of popular series sorted by score
+/// Popular: highest rated series.
+fn get_popular(page, auth) {
+    let p = page_or_one(page);
+    search_result(mu_post("/series/search", #{ orderby: "rating", page: p, perpage: 25 }), p)
+}
+
 fn browse(page, filters, auth) {
-    // Reuse search_series with a common search term to get popular results
-    // This is the cleanest way since search already handles parsing correctly
-    search_series("manga", page, auth)
+    get_popular(page, auth)
 }
 
 /// Get extended metadata for a series
 fn get_metadata(series_id, auth) {
-    // Reuse get_series since it already fetches full metadata
     get_series(series_id, auth)
 }
