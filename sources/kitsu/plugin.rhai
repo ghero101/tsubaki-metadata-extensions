@@ -33,393 +33,245 @@ fn get_headers() {
     }
 }
 
-/// Search for series matching query
-fn search_series(query, page, auth) {
-    let encoded_query = url_encode(query);
-    let offset = (page - 1) * 20;
-    let url = `${API_BASE}/manga?filter[text]=${encoded_query}&page[limit]=20&page[offset]=${offset}`;
 
+// ----------------------------------------------------------------------------
+// Shared mapping. Every listing asks for the same includes and maps items
+// through item_to_series(), so browse results carry the same ids (including
+// MAL / AniList / MangaUpdates mappings) as get_series. The browse catalog
+// stores list items as-is.
+// ----------------------------------------------------------------------------
+
+const LIST_INCLUDES = "categories,mappings";
+const FULL_INCLUDES = "genres,categories,mappings,staff,staff.person";
+
+fn kitsu_get(url) {
     let response = "";
-    try {
-        response = http_get_with_headers(url, get_headers());
-    } catch(err) {
-        return #{ series: [], has_more: false, total: 0 };
-    }
-    let data = json_parse(response);
-
-    let series = [];
-
-    if data == () {
-        return #{ series: [], has_more: false, total: 0 };
-    }
-
-    let results = data["data"];
-    if results == () {
-        return #{ series: [], has_more: false, total: 0 };
-    }
-
-    for item in results {
-        let id = item["id"];
-        let attributes = item["attributes"];
-
-        if attributes == () {
-            continue;
-        }
-
-        // Get titles
-        let titles = attributes["titles"];
-        let title = attributes["canonicalTitle"];
-        if title == () && titles != () {
-            title = titles["en"];
-            if title == () {
-                title = titles["en_jp"];
-            }
-            if title == () {
-                title = titles["ja_jp"];
-            }
-        }
-
-        if title == () || title == "" {
-            continue;
-        }
-
-        // Get alternate titles
-        let alt_titles = [];
-        if titles != () {
-            for key in titles.keys() {
-                let alt = titles[key];
-                if alt != () && alt != title && !alt_titles.contains(alt) {
-                    alt_titles.push(alt);
-                }
-            }
-        }
-
-        // Get cover image
-        let cover_url = ();
-        let poster = attributes["posterImage"];
-        if poster != () {
-            cover_url = poster["large"];
-            if cover_url == () {
-                cover_url = poster["medium"];
-            }
-            if cover_url == () {
-                cover_url = poster["original"];
-            }
-        }
-
-        // Get description
-        let description = attributes["synopsis"];
-
-        // Get status
-        let status = attributes["status"];
-        if status == "current" {
-            status = "Ongoing";
-        } else if status == "finished" {
-            status = "Completed";
-        } else if status == "tba" {
-            status = "TBA";
-        } else if status == "unreleased" {
-            status = "Unreleased";
-        } else if status == "upcoming" {
-            status = "Upcoming";
-        }
-
-        // Get year
-        let year = ();
-        let start_date = attributes["startDate"];
-        if start_date != () && start_date.len() >= 4 {
-            year = start_date.sub_string(0, 4);
-        }
-
-        // Get rating
-        let rating = attributes["averageRating"];
-
-        // Get manga subtype
-        let subtype = attributes["subtype"];
-
-        series.push(#{
-            id: id,
-            title: title,
-            url: `https://kitsu.io/manga/${attributes["slug"]}`,
-            cover_url: cover_url,
-            alternate_titles: alt_titles,
-            authors: [],
-            artists: [],
-            status: status,
-            genres: [],
-            tags: [],
-            description: description,
-            year: year,
-            extra: #{
-                kitsu_id: id,
-                rating: rating,
-                subtype: subtype
-            }
-        });
-    }
-
-    // Check pagination
-    let meta = data["meta"];
-    let total = 0;
-    if meta != () {
-        let count = meta["count"];
-        if count != () {
-            total = count;
-        }
-    }
-
-    let has_more = results.len() >= 20 && offset + 20 < total;
-
-    #{ series: series, has_more: has_more, total: total }
+    try { response = http_get_with_headers(url, get_headers()); } catch { return (); }
+    if response == () || response == "" { return (); }
+    let data = ();
+    try { data = json_parse(response); } catch {}
+    data
 }
 
-/// Get detailed series information
-fn get_series(id_or_url, auth) {
-    let manga_id = id_or_url;
+// "type:id" -> included resource
+fn index_included(included) {
+    let idx = #{};
+    if included == () { return idx; }
+    for inc in included { idx[`${inc.type}:${inc.id}`] = inc; }
+    idx
+}
 
-    // Extract ID from URL if needed
-    if id_or_url.contains("kitsu.io") {
-        // URL format: https://kitsu.io/manga/slug
-        let parts = id_or_url.split("/manga/");
-        if parts.len() > 1 {
-            let slug = parts[1].split("/")[0].split("?")[0];
-            // Need to search by slug
-            let search_url = `${API_BASE}/manga?filter[slug]=${slug}`;
-            let search_resp = "";
-            try {
-                search_resp = http_get_with_headers(search_url, get_headers());
-            } catch(err) {
-                // Fall through and try by ID
-            }
-            let search_data = json_parse(search_resp);
-            if search_data != () {
-                let search_results = search_data["data"];
-                if search_results != () && search_results.len() > 0 {
-                    manga_id = search_results[0]["id"];
-                }
-            }
-        }
+// Resources linked from `item` under relationship `rel`.
+fn related(item, rel, idx) {
+    let out = [];
+    if item.relationships == () { return out; }
+    let r = item.relationships[rel];
+    if r == () || r.data == () { return out; }
+    let refs = if type_of(r.data) == "array" { r.data } else { [r.data] };
+    for x in refs {
+        let found = idx[`${x.type}:${x.id}`];
+        if found != () { out.push(found); }
     }
+    out
+}
 
-    // Fetch manga with relationships
-    let url = `${API_BASE}/manga/${manga_id}?include=genres,categories,staff,staff.person`;
-    let response = "";
-    try {
-        response = http_get_with_headers(url, get_headers());
-    } catch(err) {
-        return #{
-            id: manga_id,
-            title: "",
-            error: `Network error: ${err}`
-        };
+fn map_status(raw) {
+    if raw == () { return (); }
+    switch raw {
+        "current" => "Ongoing",
+        "finished" => "Completed",
+        "tba" => "Upcoming",
+        "unreleased" => "Upcoming",
+        "upcoming" => "Upcoming",
+        _ => raw
     }
-    let data = json_parse(response);
+}
 
-    if data == () {
-        return #{
-            id: manga_id,
-            title: "",
-            error: "Series not found"
-        };
+// MangaUpdates mapping ids are base36 slugs ("pb8uwds"); the API id is the
+// number they encode. All-digit values are the old legacy numbering.
+// (Rhai passes maps by value, so this returns the updated map.)
+fn mu_external(raw, ids) {
+    let s = `${raw}`.trim().to_lower();
+    if s == "" { return ids; }
+    let n = 0;
+    let digits = true;
+    for c in s.chars() { if c < '0' || c > '9' { digits = false; } }
+    if digits { ids.mangaupdates_legacy = s; return ids; }
+    for c in s.chars() {
+        let v = if c >= '0' && c <= '9' { c.to_int() - 48 } else if c >= 'a' && c <= 'z' { c.to_int() - 87 } else { return ids; };
+        n = n * 36 + v;
     }
+    ids.mangaupdates = `${n}`;
+    ids
+}
 
-    let manga = data["data"];
-    if manga == () {
-        return #{
-            id: manga_id,
-            title: "",
-            error: "Series not found"
-        };
+fn item_to_series(item, idx) {
+    let id = `${item.id}`;
+    let a = item.attributes;
+
+    let titles = a.titles;
+    let title = a.canonicalTitle;
+    if (title == () || title == "") && titles != () {
+        title = if titles.en != () { titles.en } else if titles.en_jp != () { titles.en_jp } else { titles.ja_jp };
     }
+    if title == () { title = ""; }
 
-    let attributes = manga["attributes"];
-    if attributes == () {
-        return #{
-            id: manga_id,
-            title: "",
-            error: "Invalid data"
-        };
-    }
-
-    // Get titles
-    let titles = attributes["titles"];
-    let title = attributes["canonicalTitle"];
-    if title == () && titles != () {
-        title = titles["en"];
-        if title == () {
-            title = titles["en_jp"];
-        }
-    }
-
-    // Get alternate titles
     let alt_titles = [];
     if titles != () {
         for key in titles.keys() {
             let alt = titles[key];
-            if alt != () && alt != title && !alt_titles.contains(alt) {
-                alt_titles.push(alt);
-            }
+            if alt != () && alt != "" && alt != title && !alt_titles.contains(alt) { alt_titles.push(alt); }
+        }
+    }
+    if a.abbreviatedTitles != () {
+        for alt in a.abbreviatedTitles {
+            if alt != () && alt != "" && alt != title && !alt_titles.contains(alt) { alt_titles.push(alt); }
         }
     }
 
-    // Add abbreviated titles
-    let abbrev_titles = attributes["abbreviatedTitles"];
-    if abbrev_titles != () {
-        for abbrev in abbrev_titles {
-            if abbrev != () && abbrev != title && !alt_titles.contains(abbrev) {
-                alt_titles.push(abbrev);
-            }
-        }
-    }
-
-    // Get cover image
     let cover_url = ();
-    let poster = attributes["posterImage"];
-    if poster != () {
-        cover_url = poster["large"];
-        if cover_url == () {
-            cover_url = poster["original"];
-        }
+    if a.posterImage != () {
+        let p = a.posterImage;
+        cover_url = if p.original != () { p.original } else if p.large != () { p.large } else { p.medium };
+    }
+    let banner_url = ();
+    if a.coverImage != () {
+        banner_url = if a.coverImage.original != () { a.coverImage.original } else { a.coverImage.large };
     }
 
-    // Get description
-    let description = attributes["synopsis"];
-
-    // Get status. Map *all* Kitsu API values — search_series already mapped
-    // unreleased + upcoming, but get_series was passing them through raw,
-    // so UI filtering on the canonical "Ongoing/Completed/Hiatus" set
-    // missed any series in those states.
-    let status = attributes["status"];
-    if status == "current" {
-        status = "Ongoing";
-    } else if status == "finished" {
-        status = "Completed";
-    } else if status == "tba" {
-        status = "TBA";
-    } else if status == "unreleased" {
-        status = "Unreleased";
-    } else if status == "upcoming" {
-        status = "Upcoming";
-    }
-
-    // Get year
     let year = ();
-    let start_date = attributes["startDate"];
-    if start_date != () && start_date.len() >= 4 {
-        year = start_date.sub_string(0, 4);
-    }
+    if a.startDate != () && a.startDate.len() >= 4 { year = parse_int(a.startDate.sub_string(0, 4)); }
 
-    // Get rating
-    let rating = attributes["averageRating"];
-
-    // Get manga subtype
-    let subtype = attributes["subtype"];
-
-    // Get chapter/volume count
-    let chapter_count = attributes["chapterCount"];
-    let volume_count = attributes["volumeCount"];
-
-    // Get age rating
-    let age_rating = attributes["ageRating"];
-    let age_rating_guide = attributes["ageRatingGuide"];
-
-    // Process included relationships for genres and staff
     let genres = [];
+    for g in related(item, "genres", idx) {
+        if g.attributes != () && g.attributes.name != () && !genres.contains(g.attributes.name) { genres.push(g.attributes.name); }
+    }
     let tags = [];
+    for c in related(item, "categories", idx) {
+        if c.attributes != () && c.attributes.title != () && !tags.contains(c.attributes.title) { tags.push(c.attributes.title); }
+    }
+    // Kitsu's genres relationship is mostly empty now; categories carry them.
+    if genres.len() == 0 { genres = tags; tags = []; }
+
     let authors = [];
     let artists = [];
-
-    let included = data["included"];
-    // Build a people-id → name map for staff resolution
-    let people_map = #{};
-    if included != () {
-        for inc in included {
-            if inc["type"] == "people" && inc["attributes"] != () {
-                let person_name = inc["attributes"]["name"];
-                if person_name != () && person_name != "" {
-                    people_map[inc["id"]] = person_name;
-                }
-            }
+    for st in related(item, "staff", idx) {
+        let role = if st.attributes != () && st.attributes.role != () { st.attributes.role.to_lower() } else { "" };
+        let people = related(st, "person", idx);
+        if people.len() == 0 || people[0].attributes == () { continue; }
+        let name = people[0].attributes.name;
+        if name == () || name == "" { continue; }
+        if role.contains("story") || role.contains("author") || role.contains("writer") || role.contains("original") {
+            if !authors.contains(name) { authors.push(name); }
+        }
+        if role.contains("art") || role.contains("illustrat") || role.contains("draw") {
+            if !artists.contains(name) { artists.push(name); }
         }
     }
 
-    if included != () {
-        for inc in included {
-            let inc_type = inc["type"];
-            let inc_attrs = inc["attributes"];
-
-            if inc_type == "genres" && inc_attrs != () {
-                let genre_name = inc_attrs["name"];
-                if genre_name != () {
-                    genres.push(genre_name);
-                }
-            } else if inc_type == "categories" && inc_attrs != () {
-                let cat_name = inc_attrs["title"];
-                if cat_name != () {
-                    tags.push(cat_name);
-                }
-            } else if inc_type == "staff" && inc_attrs != () {
-                let role = inc_attrs["role"];
-                if role == () { role = ""; }
-                let role_lower = role.to_lower();
-                // Resolve the person name via relationship
-                let person_id = ();
-                let person_rel = inc["relationships"];
-                if person_rel != () {
-                    let p = person_rel["person"];
-                    if p != () && p["data"] != () {
-                        person_id = p["data"]["id"];
-                    }
-                }
-                if person_id == () { continue; }
-                let person_name = people_map[person_id];
-                if person_name == () || person_name == "" { continue; }
-
-                if role_lower.contains("story") || role_lower.contains("author") || role_lower.contains("writer") {
-                    if !authors.contains(person_name) { authors.push(person_name); }
-                } else if role_lower.contains("art") || role_lower.contains("illustrat") || role_lower.contains("draw") {
-                    if !artists.contains(person_name) { artists.push(person_name); }
-                } else if role_lower.contains("original") {
-                    if !authors.contains(person_name) { authors.push(person_name); }
-                }
-            }
+    let external_ids = #{ kitsu: id };
+    for m in related(item, "mappings", idx) {
+        let ma = m.attributes;
+        if ma == () || ma.externalId == () { continue; }
+        switch ma.externalSite {
+            "myanimelist/manga" => { external_ids.mal = ma.externalId; }
+            "anilist/manga" => { external_ids.anilist = ma.externalId; }
+            "mangaupdates" => { external_ids = mu_external(ma.externalId, external_ids); }
+            "mangadex" => { external_ids.mangadex = ma.externalId; }
+            _ => {}
         }
     }
 
-    // Determine content rating. Canonical safe/suggestive/nsfw set —
-    // pre-1.1.7 this returned "explicit" for R/R18 which is non-canonical
-    // and didn't match the host's UI filter.
-    let content_rating = "safe";
-    if age_rating == "R" || age_rating == "R18" {
-        content_rating = "nsfw";
-    } else if age_rating == "PG" || age_rating == "PG-13" {
-        content_rating = "suggestive";
-    }
+    let age = a.ageRating;
+    let content_rating = if age == "R18" { "adult" } else if age == "R" { "mature" } else if age == "PG" || age == "PG-13" { "suggestive" } else { "safe" };
 
     #{
-        id: manga_id,
+        id: id,
         title: title,
         alternate_titles: alt_titles,
-        description: description,
+        description: if a.synopsis != () { a.synopsis } else { a.description },
         cover_url: cover_url,
         authors: authors,
         artists: artists,
-        status: status,
+        status: map_status(a.status),
         genres: genres,
         tags: tags,
         year: year,
         content_rating: content_rating,
-        chapter_count: chapter_count,
-        url: `https://kitsu.io/manga/${attributes["slug"]}`,
+        chapter_count: a.chapterCount,
+        url: `https://kitsu.app/manga/${a.slug}`,
         extra: #{
-            kitsu_id: manga_id,
-            rating: rating,
-            subtype: subtype,
-            volume_count: volume_count,
-            age_rating: age_rating,
-            age_rating_guide: age_rating_guide
+            provider: "kitsu",
+            provider_id: id,
+            kitsu_id: id,
+            slug: a.slug,
+            external_ids: external_ids,
+            format: a.subtype,
+            score: a.averageRating,
+            popularity_rank: a.popularityRank,
+            rating_rank: a.ratingRank,
+            user_count: a.userCount,
+            volumes: a.volumeCount,
+            chapters: a.chapterCount,
+            start_date: a.startDate,
+            end_date: a.endDate,
+            serialization: a.serialization,
+            age_rating: age,
+            age_rating_guide: a.ageRatingGuide,
+            banner_url: banner_url
         }
     }
+}
+
+fn list_result(data, offset) {
+    if data == () || data.data == () {
+        return #{ series: [], has_more: false, total: 0 };
+    }
+    let idx = index_included(data.included);
+    let series = [];
+    for item in data.data {
+        if item.attributes == () { continue; }
+        let s = item_to_series(item, idx);
+        if s.title != "" { series.push(s); }
+    }
+    let total = if data.meta != () && data.meta.count != () { data.meta.count } else { () };
+    let has_more = if total != () { offset + 20 < total } else { data.data.len() >= 20 };
+    #{ series: series, has_more: has_more, total: total }
+}
+
+fn page_offset(page) {
+    let p = if page == () || page < 1 { 1 } else { page };
+    (p - 1) * 20
+}
+
+/// Search for series matching query
+fn search_series(query, page, auth) {
+    let offset = page_offset(page);
+    list_result(kitsu_get(`${API_BASE}/manga?filter[text]=${url_encode(query)}&page[limit]=20&page[offset]=${offset}&include=${LIST_INCLUDES}`), offset)
+}
+
+/// Get detailed series information by id, slug, or kitsu URL
+fn get_series(id_or_url, auth) {
+    let key = `${id_or_url}`;
+    if key.contains("/manga/") {
+        key = key.split("/manga/")[1].split("/")[0].split("?")[0];
+    }
+    let numeric = key != "";
+    for c in key.chars() { if c < '0' || c > '9' { numeric = false; break; } }
+
+    let item = ();
+    let data = ();
+    if numeric {
+        data = kitsu_get(`${API_BASE}/manga/${key}?include=${FULL_INCLUDES}`);
+        if data != () { item = data.data; }
+    } else {
+        data = kitsu_get(`${API_BASE}/manga?filter[slug]=${url_encode(key)}&include=${FULL_INCLUDES}`);
+        if data != () && data.data != () && data.data.len() > 0 { item = data.data[0]; }
+    }
+    if item == () || item.attributes == () {
+        return #{ id: key, title: "", error: "Series not found" };
+    }
+    item_to_series(item, index_included(data.included))
 }
 
 /// Get chapters - not applicable for metadata-only source
@@ -432,121 +284,14 @@ fn get_chapter_pages(chapter_id, auth) {
     []
 }
 
-/// Get latest updates - returns trending manga
+/// Browse: recently updated manga
 fn get_latest_updates(page, auth) {
-    // Use updatedAt sort for latest updates (trending only returns ~10 items)
-    let offset = (page - 1) * 20;
-    let url = `${API_BASE}/manga?sort=-updatedAt&page[limit]=20&page[offset]=${offset}`;
-
-    let response = "";
-    try {
-        response = http_get_with_headers(url, get_headers());
-    } catch(err) {
-        return #{ series: [], has_more: false };
-    }
-    let data = json_parse(response);
-
-    let series = [];
-
-    if data == () {
-        return #{ series: [], has_more: false };
-    }
-
-    let results = data["data"];
-    if results == () {
-        return #{ series: [], has_more: false };
-    }
-
-    for item in results {
-        let id = item["id"];
-        let attributes = item["attributes"];
-
-        if attributes == () {
-            continue;
-        }
-
-        let title = attributes["canonicalTitle"];
-        let slug = attributes["slug"];
-
-        // Get cover
-        let cover_url = ();
-        let poster = attributes["posterImage"];
-        if poster != () {
-            cover_url = poster["medium"];
-            if cover_url == () {
-                cover_url = poster["original"];
-            }
-        }
-
-        if title != () {
-            series.push(#{
-                id: id,
-                title: title,
-                url: `https://kitsu.io/manga/${slug}`,
-                cover_url: cover_url,
-                updated_at: ()
-            });
-        }
-    }
-
-    let has_more = results.len() >= 20;
-
-    #{ series: series, has_more: has_more }
+    let offset = page_offset(page);
+    list_result(kitsu_get(`${API_BASE}/manga?sort=-updatedAt&page[limit]=20&page[offset]=${offset}&include=${LIST_INCLUDES}`), offset)
 }
 
-/// Get popular series
+/// Popular: most followed manga
 fn get_popular(page, auth) {
-    let offset = (page - 1) * 20;
-    let url = `${API_BASE}/manga?sort=-userCount&page[limit]=20&page[offset]=${offset}`;
-
-    let response = "";
-    try {
-        response = http_get_with_headers(url, get_headers());
-    } catch(err) {
-        return #{ series: [], has_more: false };
-    }
-    let data = json_parse(response);
-
-    let series = [];
-
-    if data == () {
-        return #{ series: [], has_more: false };
-    }
-
-    let results = data["data"];
-    if results == () {
-        return #{ series: [], has_more: false };
-    }
-
-    for item in results {
-        let id = item["id"];
-        let attributes = item["attributes"];
-
-        if attributes == () {
-            continue;
-        }
-
-        let title = attributes["canonicalTitle"];
-        let slug = attributes["slug"];
-
-        // Get cover
-        let cover_url = ();
-        let poster = attributes["posterImage"];
-        if poster != () {
-            cover_url = poster["medium"];
-        }
-
-        if title != () {
-            series.push(#{
-                id: id,
-                title: title,
-                url: `https://kitsu.io/manga/${slug}`,
-                cover_url: cover_url
-            });
-        }
-    }
-
-    let has_more = results.len() >= 20;
-
-    #{ series: series, has_more: has_more }
+    let offset = page_offset(page);
+    list_result(kitsu_get(`${API_BASE}/manga?sort=-userCount&page[limit]=20&page[offset]=${offset}&include=${LIST_INCLUDES}`), offset)
 }
