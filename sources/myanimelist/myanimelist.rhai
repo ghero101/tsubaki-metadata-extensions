@@ -227,8 +227,22 @@ fn get_series(id_or_url, auth) {
     if id.contains("myanimelist.net/manga/") {
         id = id.split("/manga/")[1].split("/")[0];
     }
-    let json = jikan_get(`${BASE_URL}/manga/${id}/full`);
-    if json == () || json.data == () { return (); }
+    // Throw instead of returning () so the server reports why: a bare ()
+    // surfaced as "Expected map for SeriesInfo" and was treated as a plugin
+    // bug (no retry) when Jikan was just rate-limiting or down.
+    let response = "";
+    try { response = http_get(`${BASE_URL}/manga/${id}/full`); }
+    catch (e) { throw `MyAnimeList (Jikan) request failed for manga ${id}: ${e}`; }
+    if response == () || response == "" { throw `MyAnimeList (Jikan) returned an empty reply for manga ${id}`; }
+    let json = ();
+    try { json = json_parse(response); } catch { throw `MyAnimeList (Jikan) returned a non-JSON reply for manga ${id}`; }
+    if type_of(json) != "map" { throw `MyAnimeList (Jikan) returned an unexpected reply for manga ${id}`; }
+    if json.data == () {
+        let status = if json.status == () { "" } else { `${json.status}` };
+        if status == "404" { throw `Manga ${id} was not found on MyAnimeList (404)`; }
+        let msg = if json.message == () { "no data" } else { `${json.message}` };
+        throw `MyAnimeList (Jikan) error ${status} for manga ${id}: ${msg}`;
+    }
     item_to_series(json.data)
 }
 

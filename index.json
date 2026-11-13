@@ -1,6 +1,6 @@
 {
-  "version": 92,
-  "updated_at": "2026-11-11T20:41:47Z",
+  "version": 93,
+  "updated_at": "2026-11-13T03:49:51Z",
   "addons": [
     {
       "id": "anilist",
@@ -154,16 +154,16 @@
     {
       "id": "myanimelist",
       "name": "MyAnimeList",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "description": "MyAnimeList metadata provider - provides manga metadata via Jikan API and reading list tracking via official MAL API v2.",
       "author": "Tsubaki Team",
       "technology": "rhai",
       "addon_type": "metadata",
       "nsfw": false,
       "icon_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/myanimelist/icon.png",
-      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-0.zip",
+      "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-1.zip",
       "manifest_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/sources/myanimelist/manifest.json",
-      "latest_version": "2.1.0",
+      "latest_version": "2.1.1",
       "versions": {
         "2.0.7": {
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-0-7.zip",
@@ -184,6 +184,11 @@
           "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-0.zip",
           "released_at": "2026-11-11T20:41:47Z",
           "changelog": "Updated"
+        },
+        "2.1.1": {
+          "download_url": "https://raw.githubusercontent.com/ghero101/tsubaki-metadata-extensions/master/dist/myanimelist/myanimelist_2-1-1.zip",
+          "released_at": "2026-11-13T03:49:51Z",
+          "changelog": "Series lookups report why Jikan failed (rate limit, outage, not found) instead of an empty result, so the server retries outages."
         }
       }
     }
